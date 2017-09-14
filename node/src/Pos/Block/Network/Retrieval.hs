@@ -109,8 +109,11 @@ retrievalWorkerImpl SendActions {..} =
         (if brtContinues then handleContinues else handleAlternative)
             nodeId
             brtHeader
-    handleContinues nodeId header = processContHeader enqueueMsg nodeId header
+    handleContinues nodeId header = do
+        logDebug $ "handleContinues: " <> pretty header
+        processContHeader enqueueMsg nodeId header
     handleAlternative nodeId header = do
+        logDebug $ "handleAlternative: " <> pretty header
         mhrr <- mkHeadersRequest (headerHash header)
         case mhrr of
             MhrrBlockAdopted ->
@@ -125,21 +128,18 @@ retrievalWorkerImpl SendActions {..} =
                     newestHeader = headers ^. _NewestFirst . _neHead
                 in handleCHsValid enqueueMsg nodeId
                                   oldestHeader (headerHash newestHeader)
-        convs <- enqueueMsg (MsgRequestBlockHeaders (Just (S.singleton nodeId))) $
-            \_ _ -> pure $ Conversation $ \conv ->
-                requestHeaders cont mgh nodeId conv
-        results <- waitForConversations $ fmap (handleAll (\_ -> return (Just False))) convs
-        let Any endedRecovery = fold $ fmap mkAny results
+        conv <- enqueueMsg (MsgRequestBlockHeaders (Just (S.singleton nodeId))) $
+            \_ _ -> pure $ Conversation $ requestHeaders cont mgh nodeId
+        results <- waitForConversations conv
+        -- If requestHeaders didn't even run the continuation, then
+        -- recovery was not ended. Exceptions from conv are rethrown.
+        let Any endedRecovery = fold $ fmap (maybe (Any False) Any) results
         when endedRecovery $ logInfo "Recovery mode exited gracefully"
       where
-        -- If there was an exception, or if requestHeaders didn't even run the
-        -- continuation, then recovery was not ended.
-        mkAny :: Maybe Bool -> Any
-        mkAny = maybe (Any False) Any
     handleBlockRetrievalE nodeId header e = do
         -- REPORT:ERROR 'reportOrLogW' in block retrieval worker.
         reportOrLogW (sformat
-            ("Error handling nodeId="%build%", header="%build%": ")
+            ("handleBlockRetrievalE: error handling nodeId="%build%", header="%build%": ")
             nodeId (headerHash header)) e
         dropUpdateHeader
         dropRecoveryHeaderAndRepeat enqueueMsg nodeId
@@ -323,7 +323,7 @@ handleCHsValid enqueue nodeId lcaChild newestHash = do
                             if any (`isMoreDifficultThan` rHeader) blocks
                                 then isJust <$> tryTakeTMVar recHeaderVar
                                 else return False
-    results <- waitForConversations $ fmap (handleAll (\_ -> return False)) convs
+    results <- waitForConversations convs
     let Any endedRecovery = fold $ fmap Any results
     return endedRecovery
 
